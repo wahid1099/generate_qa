@@ -1,26 +1,24 @@
 from flask import Flask, request, jsonify
+from youtube_transcript_api import YouTubeTranscriptApi
 import re
 import json
-import requests
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
 
-# Load env variables
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for Flutter
 
-# API Keys
+# ✅ Set OpenAI API key here
 openai_api_key = os.getenv("OPENAI_API_KEY")
-youtube_api_key = os.getenv("YOUTUBE_API_KEY")
 
-# Initialize OpenAI client
+# Initialize OpenAI client (new style)
 client = OpenAI()
 
-# ✅ Function to extract YouTube video ID
+# Function to extract YouTube video ID
 def get_video_id(url):
     patterns = [
         r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})",
@@ -33,31 +31,7 @@ def get_video_id(url):
             return match.group(1)
     return None
 
-# ✅ Fetch transcript using YouTube Data API
-def fetch_transcript(video_id):
-    # Step 1: Get captions list
-    captions_url = (
-        f"https://www.googleapis.com/youtube/v3/captions"
-        f"?part=snippet&videoId={video_id}&key={youtube_api_key}"
-    )
-    captions_response = requests.get(captions_url).json()
-
-    if "items" not in captions_response or not captions_response["items"]:
-        return None
-
-    # Pick first available caption track (usually English if available)
-    caption_id = captions_response["items"][0]["id"]
-
-    # Step 2: Download transcript (srv3 = XML/JSON structured captions)
-    transcript_url = f"https://www.googleapis.com/youtube/v3/captions/{caption_id}?tfmt=srv3&key={youtube_api_key}"
-    transcript_response = requests.get(transcript_url)
-
-    if transcript_response.status_code != 200:
-        return None
-
-    return transcript_response.text
-
-# ✅ Split transcript into chunks
+# Split long transcript into chunks
 def chunk_text(text, max_chunk_size=3000):
     words = text.split()
     chunks = []
@@ -98,18 +72,23 @@ def generate_qa():
         if not video_id:
             return jsonify({'error': 'Invalid YouTube URL format'}), 400
 
-        # ✅ Fetch transcript
-        transcript_text = fetch_transcript(video_id)
-        if not transcript_text:
-            return jsonify({'error': 'Could not fetch transcript'}), 500
+        # Get transcript
+        try:
+            ytt = YouTubeTranscriptApi()
+            transcript = ytt.fetch(video_id, languages=['en', 'bn', 'hi'])
 
-        if len(transcript_text.strip()) < 100:
+        except Exception as e:
+            return jsonify({'error': f"Could not fetch transcript: {str(e)}"}), 500
+
+        full_text = " ".join([entry.text for entry in transcript])
+
+        if len(full_text.strip()) < 100:
             return jsonify({'error': 'Transcript too short to generate meaningful questions'}), 400
 
-        chunks = chunk_text(transcript_text)
+        chunks = chunk_text(full_text)
         text_to_process = chunks[0]
 
-        # ✅ Prompt OpenAI
+        # Prompt to OpenAI
         prompt = f"""Based on the following transcript, generate exactly {count} educational question-answer pairs in JSON format.
 
 Requirements:
@@ -127,6 +106,7 @@ Format:
 Transcript:
 {text_to_process}"""
 
+        # New OpenAI API call style
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
@@ -153,15 +133,15 @@ Transcript:
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({
-        'status': 'Server is running',
-        'openai_configured': bool(openai_api_key),
-        'youtube_configured': bool(youtube_api_key)
-    })
+    return jsonify({'status': 'Server is running', 'openai_configured': bool(openai_api_key)})
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({'message': 'Flask app is running on Render'})
 
 if __name__ == '__main__':
+    # Use PORT environment variable provided by Render
+    port = int(os.environ.get('PORT', 5000))
     if not openai_api_key:
         print("⚠️ Warning: OPENAI_API_KEY not set!")
-    if not youtube_api_key:
-        print("⚠️ Warning: YOUTUBE_API_KEY not set!")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
